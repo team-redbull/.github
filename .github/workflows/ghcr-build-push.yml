@@ -1,0 +1,84 @@
+name: Reusable - Build and Push to GHCR
+
+# Shared build/version/push flow for team-redbull service repos. Callers
+# provide a thin workflow (see README) that just triggers this on push to
+# main. Change this file once; every repo picks it up on its next run.
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Image name (without registry/owner prefix). Defaults to the calling repo's name."
+        required: false
+        type: string
+        default: ""
+      helm-values-path:
+        description: "Path to the Helm chart's values.yaml to bump image.repository/tag in."
+        required: false
+        type: string
+        default: "deploy/helm/values.yaml"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Resolve image name
+      id: image
+      run: |
+        NAME="${{ inputs.image-name }}"
+        if [[ -z "$NAME" ]]; then
+          NAME="${{ github.event.repository.name }}"
+        fi
+        echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+    - name: Generate version
+      id: version
+      run: |
+        LATEST_TAG=$(git tag -l "v*.*.*" | sort -V | tail -n1)
+        if [[ -z "$LATEST_TAG" ]]; then
+          VERSION="v1.0.0"
+        else
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST_TAG#v}"
+          PATCH=$((PATCH + 1))
+          VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+        fi
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "version_plain=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+    - name: Log in to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ghcr.io/${{ github.repository_owner }}/${{ steps.image.outputs.name }}:${{ steps.version.outputs.version }}
+
+    - name: Update Helm chart image tag
+      run: |
+        sed -i "s|^  repository:.*|  repository: ghcr.io/${{ github.repository_owner }}/${{ steps.image.outputs.name }}|" "${{ inputs.helm-values-path }}"
+        sed -i "s|^  tag:.*|  tag: ${{ steps.version.outputs.version }}|" "${{ inputs.helm-values-path }}"
+
+    - name: Commit and tag version
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add "${{ inputs.helm-values-path }}"
+        git commit -m "chore: bump image tag to ${{ steps.version.outputs.version }}"
+        git tag ${{ steps.version.outputs.version }}
+        git push origin HEAD:${{ github.ref_name }} ${{ steps.version.outputs.version }}
