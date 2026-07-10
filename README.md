@@ -36,17 +36,28 @@ instead of always-latest).
 
 Two workflows keep GHCR from accumulating unbounded per-commit images from
 non-main branches. Both require a `GHCR_CLEANUP_TOKEN` secret (a classic
-PAT with `read:packages` + `delete:packages`, added as an org secret and
-scoped to whichever repos need it).
+PAT with `read:packages` + `delete:packages`, added as an org secret).
+**This secret must be scoped to `team-redbull/.github` itself** (not just
+the repos that get cleaned up) — the scheduled sweep runs in *this* repo's
+own Actions context, so without it here the "fully centralized" part below
+silently has nothing to delete with. Scope it to any other repo too if
+that repo also wants the on-delete piece.
 
-- **`ghcr-cleanup-scheduled.yml`** — runs nightly (+ `workflow_dispatch`)
-  against *every* container package in the org, keeping only the newest
-  tag per branch slug. This one is fully centralized: it discovers
-  packages via the org Packages API on its own, so **no repo needs to
-  reference it or change anything** to get this behavior.
+Main's `vX.Y.Z` release tags are never touched by either workflow — both
+explicitly exclude anything matching `^v[0-9]+\.[0-9]+\.[0-9]+$` before
+considering what to prune.
+
+- **`ghcr-cleanup-scheduled.yml`** — runs nightly (+ `workflow_dispatch`,
+  which also accepts a `keep` input if you want to keep more than the
+  default 1 tag per branch) against *every* container package in the org,
+  keeping only the newest tag(s) per branch slug. This one is fully
+  centralized: it discovers packages via the org Packages API on its own,
+  so **no repo needs to reference it or change anything** to get this
+  behavior.
 
 - **`ghcr-cleanup-on-delete.yml`** — purges all tags for a branch the
-  moment it's deleted. This one *does* need a small addition per repo,
+  moment it's deleted (not on PR close — only when the branch ref itself
+  is actually deleted). This one *does* need a small addition per repo,
   because GitHub only fires the `delete` event for workflows registered in
   the repo where the branch lived — a reusable `workflow_call` workflow is
   never invoked on its own. Add this to your repo's existing
@@ -76,3 +87,12 @@ scoped to whichever repos need it).
         image-name: segments-manager
       secrets: inherit
   ```
+
+  **If your repo isn't on `ghcr-build-push.yml` yet** (still has its own
+  bespoke build job, publishing elsewhere), don't swap that job to adopt
+  cleanup — just add the `delete` trigger and `cleanup-on-delete` job
+  alongside your existing `build` job, guarded the same way
+  (`if: github.event_name == 'push'` on your existing job so it doesn't
+  fire on delete events too). `ghcr-cleanup-on-delete.yml` only manages
+  GHCR tags for the `image-name` you give it; it doesn't care what your
+  build job does or what registry it publishes to.
