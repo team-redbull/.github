@@ -1,0 +1,58 @@
+name: GHCR cleanup - keep latest per branch (org-wide)
+
+# Prunes old per-commit image tags across every container package in the
+# org, keeping only the newest N tags per branch slug. main's vX.Y.Z
+# release tags are never touched. Fully centralized: this discovers
+# packages via the org Packages API on its own, so no caller workflow is
+# needed in any repo for this part.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: "How many tags to keep per non-main branch"
+        required: false
+        default: "1"
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune old non-main branch tags across all org container packages
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_CLEANUP_TOKEN }}
+          KEEP: ${{ github.event.inputs.keep || '1' }}
+        run: |
+          set -euo pipefail
+          OWNER="team-redbull"
+
+          PACKAGES=$(gh api --paginate "/orgs/${OWNER}/packages?package_type=container&per_page=100" --jq '.[].name')
+
+          for PACKAGE in $PACKAGES; do
+            echo "::group::${PACKAGE}"
+
+            if ! gh api --paginate "/orgs/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100" \
+                 > "versions-${PACKAGE}.json" 2>/dev/null; then
+              echo "skip (no access or no versions)"
+              echo "::endgroup::"
+              continue
+            fi
+
+            jq -r --argjson keep "$KEEP" '
+              [ .[] | select(.metadata.container.tags | length > 0)
+                | { id, created_at, tag: .metadata.container.tags[0] }
+                | select(.tag | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$") | not)
+                | . + { slug: (.tag | sub("-[0-9a-f]{7,40}$"; "")) } ]
+              | group_by(.slug)
+              | map(sort_by(.created_at) | reverse | .[$keep:])
+              | flatten
+              | .[] | "\(.id)\t\(.tag)"
+            ' "versions-${PACKAGE}.json" | while IFS=$'\t' read -r id tag; do
+                echo "Deleting version $id (tag: $tag)"
+                gh api -X DELETE "/orgs/${OWNER}/packages/container/${PACKAGE}/versions/${id}"
+              done
+
+            echo "::endgroup::"
+          done
