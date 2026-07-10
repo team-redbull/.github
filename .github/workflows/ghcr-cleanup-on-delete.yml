@@ -1,0 +1,52 @@
+name: Reusable - GHCR cleanup on branch delete
+
+# Removes every image tag belonging to a branch as soon as that branch ref
+# is deleted. GitHub only fires `delete` for workflows registered in the
+# repo where the ref lived, so callers still need a small `on: delete`
+# addition to their own build.yml - see README.md for the snippet. That
+# addition can't be avoided (workflow_call jobs never run on their own;
+# they only run when the caller's own triggers fire), but this keeps all
+# the actual cleanup logic in one shared place.
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Image name (without registry/owner prefix). Defaults to the calling repo's name."
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  cleanup:
+    if: github.event.ref_type == 'branch' && github.event.ref != 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve image name
+        id: image
+        run: |
+          NAME="${{ inputs.image-name }}"
+          if [[ -z "$NAME" ]]; then
+            NAME="${{ github.event.repository.name }}"
+          fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Delete all image tags for the deleted branch
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_CLEANUP_TOKEN }}
+          BRANCH: ${{ github.event.ref }}
+          PACKAGE: ${{ steps.image.outputs.name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          SLUG=$(echo "$BRANCH" | tr -c 'a-zA-Z0-9' '-' | tr 'A-Z' 'a-z' | sed 's/-\+/-/g; s/^-//; s/-$//')
+
+          gh api --paginate "/orgs/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100" \
+          | jq -r --arg slug "$SLUG" '
+              .[] | select(.metadata.container.tags | length > 0)
+              | select((.metadata.container.tags[0] | sub("-[0-9a-f]{7,40}$"; "")) == $slug)
+              | "\(.id)\t\(.metadata.container.tags[0])"
+            ' | while IFS=$'\t' read -r id tag; do
+              echo "Deleting version $id (tag: $tag, branch $BRANCH deleted)"
+              gh api -X DELETE "/orgs/${OWNER}/packages/container/${PACKAGE}/versions/${id}"
+            done
