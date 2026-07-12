@@ -5,9 +5,9 @@ Org-wide shared GitHub Actions reusable workflows and community defaults.
 ## `ghcr-build-push.yml`
 
 Shared build/version/push flow for team-redbull service repos: bumps a
-semver git tag, builds the Dockerfile in the repo root, pushes it to GHCR,
-then bumps `image.repository`/`image.tag` in the repo's Helm chart values
-and commits that change back.
+semver git tag, builds a Dockerfile, pushes it to GHCR, then bumps an
+`{repository, tag}` block in the repo's Helm chart values and commits that
+change back.
 
 Each repo needing this should have a thin caller workflow, e.g.
 `.github/workflows/build.yml`:
@@ -25,12 +25,46 @@ jobs:
     with:
       image-name: segments-manager          # optional; defaults to the repo name
       helm-values-path: deploy/helm/values.yaml   # optional; this is the default
+      dockerfile: Dockerfile                # optional; this is the default (repo-root Dockerfile, repo-root build context)
+      helm-image-path: image                # optional; this is the default (yq path to the {repository, tag} block)
     secrets: inherit
 ```
 
 Change the shared flow once here — every caller picks it up on its next
 run (pin `@main` to a tag, e.g. `@v1`, if you want controlled rollout
 instead of always-latest).
+
+### Multiple images from one repo
+
+A repo that publishes more than one image (e.g. a Temporal "brain" +
+"limb" pair, each its own Dockerfile and its own `{repository, tag}` block
+in the same `values.yaml`) calls the reusable workflow once per image, with
+`dockerfile` and `helm-image-path` set per call. **Chain them with `needs:`
+so they run sequentially, not in parallel** — every call bumps the same
+shared `vX.Y.Z` git tag sequence and commits+pushes to the same branch;
+parallel calls would race on both the tag and the push.
+
+```yaml
+jobs:
+  build-brain:
+    uses: team-redbull/.github/.github/workflows/ghcr-build-push.yml@main
+    with:
+      image-name: connectivity-workflow
+      dockerfile: workflows/Dockerfile
+      helm-values-path: helm/connectivity/values.yaml
+      helm-image-path: workflowWorker.image
+    secrets: inherit
+
+  build-activity:
+    needs: build-brain   # sequential: avoids racing build-brain on the git tag/push
+    uses: team-redbull/.github/.github/workflows/ghcr-build-push.yml@main
+    with:
+      image-name: connectivity-activity
+      dockerfile: activities/connectivity/Dockerfile
+      helm-values-path: helm/connectivity/values.yaml
+      helm-image-path: activityWorker.image
+    secrets: inherit
+```
 
 ## GHCR image cleanup
 

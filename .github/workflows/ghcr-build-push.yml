@@ -19,6 +19,16 @@ on:
         required: false
         type: string
         default: "deploy/helm/values.yaml"
+      dockerfile:
+        description: "Path (relative to repo root) to the Dockerfile to build, with repo root as build context."
+        required: false
+        type: string
+        default: "Dockerfile"
+      helm-image-path:
+        description: "yq path (relative to the values.yaml root) to the {repository, tag} block to bump. Use for charts with more than one image, e.g. 'workflowWorker.image'."
+        required: false
+        type: string
+        default: "image"
 
 permissions:
   contents: write
@@ -77,13 +87,14 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         context: .
+        file: ${{ inputs.dockerfile }}
         push: true
         tags: ghcr.io/${{ github.repository_owner }}/${{ steps.image.outputs.name }}:${{ steps.version.outputs.version }}
 
     - name: Update Helm chart image tag
       run: |
-        sed -i "s|^  repository:.*|  repository: ghcr.io/${{ github.repository_owner }}/${{ steps.image.outputs.name }}|" "${{ inputs.helm-values-path }}"
-        sed -i "s|^  tag:.*|  tag: ${{ steps.version.outputs.version }}|" "${{ inputs.helm-values-path }}"
+        yq -i '.${{ inputs.helm-image-path }}.repository = "ghcr.io/${{ github.repository_owner }}/${{ steps.image.outputs.name }}"' "${{ inputs.helm-values-path }}"
+        yq -i '.${{ inputs.helm-image-path }}.tag = "${{ steps.version.outputs.version }}"' "${{ inputs.helm-values-path }}"
 
     - name: Commit and tag version
       run: |
