@@ -43,6 +43,11 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        # Explicit ref, not the default github.sha: github.sha is pinned to the
+        # commit that triggered the run, so a second job chained after this one
+        # via needs: (multi-image callers) would otherwise check out the
+        # pre-first-job commit and silently overwrite its Helm value bump.
+        ref: ${{ github.ref_name }}
 
     - name: Resolve image name
       id: image
